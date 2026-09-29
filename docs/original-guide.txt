@@ -1,0 +1,405 @@
+Part 1 — Getting the process handle (fix for "can't find game" / instant close)
+
+The cheat finds the game by its window class "H1Z1 PlayClient (Live)" rather than scanning by .exe name. If it's not finding the process, 99% of the time it's one of the issues listed below.
+
+cpp:
+// ─────────────────────────────────────────────────────────
+// Enable SeDebugPrivilege — do this FIRST in main()
+// Without it, OpenProcess fails silently on protected games
+// ─────────────────────────────────────────────────────────
+void EnableDebugPrivilege()
+{
+HANDLE hToken;
+if (OpenProcessToken(GetCurrentProcess(),
+TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+{
+LUID luid;
+LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luid);
+TOKEN_PRIVILEGES tp = { 1, { luid, SE_PRIVILEGE_ENABLED } };
+AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+CloseHandle(hToken);
+}
+}
+ 
+// ─────────────────────────────────────────────────────────
+// Get process ID from the game window
+// Window class is "H1Z1 PlayClient (Live)" — not the .exe name
+// ─────────────────────────────────────────────────────────
+DWORD procID = 0;
+HANDLE handle = nullptr;
+ 
+void InitProcess()
+{
+EnableDebugPrivilege();
+ 
+// find window by class name first, fall back to title
+HWND hwnd = FindWindowA("H1Z1 PlayClient (Live)", NULL);
+if (!hwnd) hwnd = FindWindowA(NULL, "H1Z1 PlayClient (Live)");
+if (!hwnd)
+{
+    MessageBoxA(0, "Game window not found.\n"
+                   "Make sure H1Z1 is running and fully loaded.", "Error", MB_OK);
+    ExitProcess(0);
+}
+ 
+GetWindowThreadProcessId(hwnd, &procID);
+ 
+// try escalating access levels — use whatever works
+handle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, procID);
+if (!handle)
+    handle = OpenProcess(
+        PROCESS_VM_READ | PROCESS_VM_WRITE |
+        PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+        FALSE, procID);
+if (!handle)
+    handle = OpenProcess(
+        PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
+        FALSE, procID);
+ 
+if (!handle)
+{
+    MessageBoxA(0, "OpenProcess failed.\n"
+                   "Run the cheat as Administrator.", "Error", MB_OK);
+    ExitProcess(0);
+}
+ 
+}
+
+Code:
+Common failure reasons:
+ 
+Not running as Administrator
+→ right-click .exe → Run as administrator
+→ or Properties → Compatibility → tick "Run as administrator"
+Launching before the game has finished loading
+→ wait until you're at the main menu before opening the cheat
+SeDebugPrivilege not enabled
+→ the EnableDebugPrivilege() call above fixes this
+→ without it OpenProcess(PROCESS_ALL_ACCESS) returns NULL on some configs
+Window not found
+→ confirm the class name in Spy++ or WinSpy
+→ the class is "H1Z1 PlayClient (Live)" — exact match, case sensitive in FindWindowA
+Part 2 — Offsets
+
+cpp:
+// ─────────────────────────────────────────────────────────
+// Base addresses (absolute VA — do NOT add module base)
+// ─────────────────────────────────────────────────────────
+#define ADDRESS_CGAME 0x14476D290
+#define ADDRESS_CGRAPHICS 0x14476E748
+#define ADDRESS_PHYSICS 0x1462B65A8
+ 
+// ─────────────────────────────────────────────────────────
+// Entity list
+// ─────────────────────────────────────────────────────────
+#define OFFSET_LocalPly 0x780
+#define OFFSET_EntEntry 0x748
+#define OFFSET_EntCount 0x50
+#define OFFSET_NEXTPLY 0x720
+#define OFFSET_NEXTVEH 0x700
+#define OFFSET_NEXTITM 0x718
+ 
+// ─────────────────────────────────────────────────────────
+// Player
+// ─────────────────────────────────────────────────────────
+#define OFFSET_TYPE 0x3F8
+#define OFFSET_NAME 0x7B8
+#define OFFSET_ID 0x688
+#define OFFSET_STANCE 0x954 // 0=stand 1=crouch 6/7=prone
+#define OFFSET_YAW 0x530
+#define OFFSET_PITCH 0x534
+#define OFFSET_VELOCITY 0x430
+#define OFFSET_PLAYER_BASE 0x300
+#define OFFSET_VBASEPOS 0x3A8 // feet position
+#define OFFSET_VPELVISPOS 0x3F0
+#define OFFSET_INVEHICLE 0x18 // actor+0x18, nonzero = in vehicle
+ 
+// ─────────────────────────────────────────────────────────
+// Health
+// ─────────────────────────────────────────────────────────
+#define OFFSET_HEALTHBASE 0x3DC8
+#define OFFSET_HEALTH 0xB0 // read as int, divide by 100
+ 
+// ─────────────────────────────────────────────────────────
+// Camera / matrix
+// ─────────────────────────────────────────────────────────
+#define OFFSET_CAMERA 0x48
+#define OFFSET_MATRIX 0x30
+#define OFFSET_MATRIX_DEF 0x1B0
+ 
+// ─────────────────────────────────────────────────────────
+// World objects
+// ─────────────────────────────────────────────────────────
+#define OFFSET_ITEMPOS 0x18C0
+#define OFFSET_CARPOS 0x9D0
+ 
+// ─────────────────────────────────────────────────────────
+// Skeleton
+// ─────────────────────────────────────────────────────────
+#define OFFSET_SkeletonActors 0x5C0
+#define OFFSET_SkeletonStarts 0x250
+#define OFFSET_SkeletonInfos 0x50
+#define OFFSET_BoneInfo 0x28
+ 
+// ─────────────────────────────────────────────────────────
+// Entity type IDs
+// ─────────────────────────────────────────────────────────
+#define TYPE_Player 0x10E
+#define TYPE_Loot 0x2E
+#define TYPE_Weapon 0x34
+#define TYPE_Ammo 0x15
+#define TYPE_Grenade 0xAE
+#define TYPE_NonLethal 0xB2
+#define TYPE_ITEM 0x2C
+#define TYPE_OffRoader 0x11
+#define TYPE_CAR_2 0x72
+#define TYPE_CAR_3 0x76
+#define TYPE_ATV 0xCC
+
+Part 3 — Skeleton ESP
+
+cpp:
+// ─────────────────────────────────────────────────────────
+// Bone indices
+// ─────────────────────────────────────────────────────────
+static const size_t kHeadBoneIdx = 26;
+static const size_t kNeckBoneIdx = 24;
+static const size_t kChestBoneIdx = 23;
+static const size_t kSpineBoneIdx = 22;
+static const size_t kPelvisBoneIdx = 12;
+static const size_t kLShoulderIdx = 52;
+static const size_t kLElbowBoneIdx = 54;
+static const size_t kLHandIdx = 55;
+static const size_t kRShoulderIdx = 76;
+static const size_t kRElbowBoneIdx = 78;
+static const size_t kRHandIdx = 79;
+static const size_t kLHipIdx = 13;
+static const size_t kLKneeBoneIdx = 14;
+static const size_t kLFootBoneIdx = 16;
+static const size_t kRHipIdx = 110; // right leg uses high indices
+static const size_t kRKneeBoneIdx = 111;
+static const size_t kRFootBoneIdx = 113;
+ 
+// ─────────────────────────────────────────────────────────
+// Read a bone and rotate it into world space
+// ─────────────────────────────────────────────────────────
+D3DXVECTOR3 GetBoneWorld(uint64_t entity, size_t boneIdx,
+const D3DXVECTOR3& feetPos, float yaw)
+{
+uint64_t actor = read<uint64_t>(handle, entity + OFFSET_SkeletonActors);
+uint64_t skeleton = read<uint64_t>(handle, actor + OFFSET_SkeletonStarts);
+uint64_t pose = read<uint64_t>(handle, skeleton + OFFSET_SkeletonInfos);
+uint64_t jointData = read<uint64_t>(handle, pose + OFFSET_BoneInfo);
+ 
+// bones are stored at stride 0x30 in local space
+D3DXVECTOR3 local = read<D3DXVECTOR3>(handle, jointData + boneIdx * 0x30);
+ 
+// rotate XZ plane by player yaw — skip this and bones break on any direction
+float s = sinf(yaw), c = cosf(yaw);
+return D3DXVECTOR3(
+    feetPos.x + local.x * c - local.z * s,
+    feetPos.y + local.y,
+    feetPos.z + local.x * s + local.z * c
+);
+ 
+}
+ 
+// skip zeroed / out-of-range reads before drawing
+static bool IsValidBone(const D3DXVECTOR3& v)
+{
+return !(v.x == 0.0f && v.y == 0.0f && v.z == 0.0f)
+&& fabsf(v.x) < 15000.0f
+&& fabsf(v.y) < 15000.0f
+&& fabsf(v.z) < 15000.0f;
+}
+ 
+// ─────────────────────────────────────────────────────────
+// Draw — call inside your entity loop after W2S check
+// ─────────────────────────────────────────────────────────
+auto BoneLine = [&](size_t idxA, size_t idxB, DWORD col)
+{
+D3DXVECTOR3 a = GetBoneWorld(entity, idxA, feetPos, yaw);
+D3DXVECTOR3 b = GetBoneWorld(entity, idxB, feetPos, yaw);
+if (!IsValidBone(a) || !IsValidBone(b)) return;
+D3DXVECTOR3 sa, sb;
+if (W2S(a, sa) && W2S(b, sb))
+DrawLine(sa.x, sa.y, sb.x, sb.y, 1.5f, col);
+};
+ 
+// spine
+BoneLine(kPelvisBoneIdx, kSpineBoneIdx, col);
+BoneLine(kSpineBoneIdx, kChestBoneIdx, col);
+BoneLine(kChestBoneIdx, kNeckBoneIdx, col);
+BoneLine(kNeckBoneIdx, kHeadBoneIdx, col);
+// left arm
+BoneLine(kChestBoneIdx, kLShoulderIdx, col);
+BoneLine(kLShoulderIdx, kLElbowBoneIdx, col);
+BoneLine(kLElbowBoneIdx, kLHandIdx, col);
+// right arm
+BoneLine(kChestBoneIdx, kRShoulderIdx, col);
+BoneLine(kRShoulderIdx, kRElbowBoneIdx, col);
+BoneLine(kRElbowBoneIdx, kRHandIdx, col);
+// left leg
+BoneLine(kPelvisBoneIdx, kLHipIdx, col);
+BoneLine(kLHipIdx, kLKneeBoneIdx, col);
+BoneLine(kLKneeBoneIdx, kLFootBoneIdx, col);
+// right leg
+BoneLine(kPelvisBoneIdx, kRHipIdx, col);
+BoneLine(kRHipIdx, kRKneeBoneIdx, col);
+BoneLine(kRKneeBoneIdx, kRFootBoneIdx, col);
+
+Part 4 — Players inside vehicles
+
+This one trips up a lot of externals. When a player mounts a vehicle, two things break:
+
+The player's position at OFFSET_VBASEPOS / OFFSET_VPELVISPOS stops updating — it freezes at dismount location
+The health offset (OFFSET_HEALTHBASE → OFFSET_HEALTH) can return 0 or garbage, so your Healthbase > 0 gate skips them entirely
+
+How to detect and handle it:
+
+Code:
+cpp
+// Read the mount pointer — nonzero means the player is inside a vehicle
+// The pointer lives at actor + 0x3A08 (derived offset; the define at 0x18 is
+// used if you're reading from a CEntityInfo struct directly)
+uint64_t mountPtr = read<uint64_t>(handle, actor + 0x3A08);
+bool bInVehicle   = (mountPtr > 0x10000);  // sanity-range check to reject null/junk
+Position: read from the vehicle, not the player:
+
+Code:
+cpp
+D3DXVECTOR3 feetPos;
+if (bInVehicle)
+{
+    // Read position from the vehicle the player is mounted in
+    feetPos = read<D3DXVECTOR3>(handle, mountPtr + OFFSET_CARPOS);
+}
+else
+{
+    feetPos = read<D3DXVECTOR3>(handle, entityPosBase + OFFSET_VBASEPOS);
+}
+Health gate: bypass it for vehicle occupants:
+
+Code:
+cpp
+// DEAD tag only for on-foot dead players (health gate is unreliable when mounted)
+if (Healthbase == 0 && !bInVehicle)
+{
+    SText(headScreen.x, headScreen.y, ..., L"DEAD");
+}
+ 
+// Draw all ESP (box, bones, name, health bar) if health is valid OR player is in vehicle
+if ((Healthbase > 0 && Healthbase < 101) || bInVehicle)
+{
+    // your full ESP block here
+}
+Velocity also comes from the vehicle:
+
+Code:
+cpp
+D3DXVECTOR3 velocity = bInVehicle
+    ? read<D3DXVECTOR3>(handle, mountPtr + OFFSET_VELOCITY)
+    : read<D3DXVECTOR3>(handle, actor + OFFSET_VELOCITY);
+That's all there is to it. Once you gate on bInVehicle the ESP will track players correctly even while they're driving or riding, and you won't skip them because health read zero.
+
+Part 5 — Aimbot + Velocity Prediction (with per-weapon bullet speed)
+
+Variables before the entity loop:
+
+Code:
+cpp
+float        bestFov       = g_AimbotFOV;
+D3DXVECTOR3  bestWorldHead = {};
+D3DXVECTOR3  bestVel       = {};
+float        bestDist      = 0.0f;
+Read the active weapon and set bullet speed once per frame, before the entity loop:
+
+Code:
+cpp
+// Active weapon bullet speed — read from local player inventory each frame
+float g_BulletSpeed = 375.0f;  // default: AR-15 / AK-47
+{
+    uint64_t inventory  = read<uint64_t>(handle, LocalPly + 0xCE8);
+    uint64_t weaponName = read<uint64_t>(handle, inventory + 0x24);
+    char     wepBuf[64] = {};
+    ReadProcessMemory(handle, (LPCVOID)weaponName, wepBuf, sizeof(wepBuf) - 1, NULL);
+    string wepStr(wepBuf);
+ 
+    if      (wepStr.find("AR15")        != string::npos) g_BulletSpeed = 375.0f;
+    else if (wepStr.find("AK47")        != string::npos) g_BulletSpeed = 375.0f;
+    else if (wepStr.find("M40Sniper")   != string::npos) g_BulletSpeed = 659.0f;
+    else if (wepStr.find("RanchRifle")  != string::npos) g_BulletSpeed = 350.0f;
+    else if (wepStr.find("MK46")        != string::npos) g_BulletSpeed = 250.0f;
+    else if (wepStr.find("RiotShotgun") != string::npos) g_BulletSpeed = 175.0f;
+    else if (wepStr.find("M9")          != string::npos) g_BulletSpeed = 251.0f;
+    else if (wepStr.find("45Auto")      != string::npos) g_BulletSpeed = 251.0f;  // M1911
+    else if (wepStr.find("Magnum")      != string::npos) g_BulletSpeed = 251.0f;
+    else if (wepStr.find("Crossbow")    != string::npos) g_BulletSpeed = 120.0f;
+    else if (wepStr.find("Bow01")       != string::npos) g_BulletSpeed =  75.0f;
+    // Grenades / fists / binoculars — aimbot irrelevant, stays at AR default
+}
+The weapon name lives at LocalPly + 0xCE8 (inventory) + 0x24 (name pointer). The strings are the internal .adr asset names — "Weapons_AK47_3P.adr" etc. — so find() on a substring is enough, no exact match needed.
+
+Inside the entity loop — candidate selection:
+
+Code:
+cpp
+D3DXVECTOR3 velocity = bInVehicle
+    ? read<D3DXVECTOR3>(handle, mountPtr + OFFSET_VELOCITY)
+    : read<D3DXVECTOR3>(handle, EntEntry  + OFFSET_VELOCITY);
+ 
+if (g_Aimbot && DistPly > 0 && DistPly < g_MaxPlayerDist &&
+    Healthbase > 0 && Healthbase < 101 &&
+    (!g_VisCheck || bPlayerVisible))
+{
+    float dx = HeadPosition.x - (screen_width  * 0.5f);
+    float dy = HeadPosition.y - (screen_height * 0.5f);
+    float fovDist = sqrtf(dx * dx + dy * dy);
+ 
+    if (fovDist < g_AimbotFOV && fovDist < bestFov)
+    {
+        bestFov       = fovDist;
+        bestWorldHead = HeadWorld;  // world-space, not screen — needed for prediction
+        bestVel       = velocity;
+        bestDist      = DistPly;
+    }
+}
+After the entity loop — fire solution:
+
+Code:
+cpp
+if (g_AimbotActive && bestFov < g_AimbotFOV)
+{
+    // Step 1: time for bullet to reach target using active weapon speed
+    float travelTime = bestDist / g_BulletSpeed;
+ 
+    // Step 2: predicted world position (velocity in m/s, travelTime in seconds)
+    D3DXVECTOR3 predictedWorld = bestWorldHead + bestVel * travelTime;
+ 
+    // Step 3: project to screen AFTER adding prediction
+    D3DXVECTOR3 predictedScreen = W2Sv2(predictedWorld);
+ 
+    // Step 4: delta from crosshair to predicted screen pos
+    float aimX = predictedScreen.x - (screen_width  * 0.5f);
+    float aimY = predictedScreen.y - (screen_height * 0.5f);
+ 
+    // Step 5: apply smoothing and move mouse
+    int moveX = (int)(aimX * g_AimbotSmooth);
+    int moveY = (int)(aimY * g_AimbotSmooth);
+ 
+    mouse_event(MOUSE_MOVE_RELATIVE, moveX, moveY, 0, 0);
+}
+The two things that matter:
+
+Prediction is in world space — add velocity * travelTime to the head's world position, then W2S. Doing it in screen space after projection is wrong because screen pixels aren't linear with distance.
+travelTime = dist / g_BulletSpeed — dist is metres, g_BulletSpeed is m/s, result is seconds. Velocity from OFFSET_VELOCITY is already in m/s so the units cancel cleanly. The bullet speed updates automatically each frame based on whatever weapon you're holding — no manual switching needed.
+
+Code:
+Notes:
+All base addresses are absolute VAs — do NOT add module base on top
+Health: read as int, divide by 100 to get 0-100
+OFFSET_INVEHICLE: when nonzero the health offset returns garbage — gate
+your player ESP with a vehicle check or health will read 0 for mounted players
+Right leg bone indices (110-113) are much higher than left leg (13-16),
+this is intentional — common bug is people copy left leg indices for both sides
+Offsets verified 22/9/26, ill keep updated on patches but we shouldnt see one for some time

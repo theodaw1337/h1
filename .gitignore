@@ -1,0 +1,7 @@
+/.deps/
+/build/
+/dist/
+/original-*.zip
+*.log
+/build-log.txt
+/.publish/
